@@ -2,6 +2,8 @@ package com.drinkwater.app
 
 import android.Manifest
 import android.app.AlarmManager
+import android.app.TimePickerDialog
+import java.util.Locale
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -86,46 +88,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startSelectedReminder() {
-        if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            !(getSystemService(ALARM_SERVICE) as AlarmManager)
-                .canScheduleExactAlarms()
-        ) {
-            startActivity(
-                Intent(
-                    Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                    Uri.parse("package:$packageName")
-                )
-            )
+        val prefs = getSharedPreferences("water", MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             return
         }
-
-        val minutes = getSharedPreferences("water", MODE_PRIVATE)
-            .getInt("interval", 30)
-
-        getSharedPreferences("water", MODE_PRIVATE)
-            .edit()
-            .putBoolean("active", true)
-            .apply()
-
-        scheduleReminder(this, minutes)
+        // Inexact fallback is supported when exact alarm access is unavailable.
+        prefs.edit().putBoolean("active", true).apply()
+        DailyScheduleScheduler.scheduleNext(this)
     }
 
     private fun stopReminder() {
-        getSharedPreferences("water", MODE_PRIVATE)
-            .edit()
-            .putBoolean("active", false)
-            .apply()
-
-        val intent = Intent(this, WaterReminderReceiver::class.java)
-        val pending = PendingIntent.getBroadcast(
-            this, 100, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        (getSystemService(ALARM_SERVICE) as AlarmManager)
-            .cancel(pending)
+        getSharedPreferences("water", MODE_PRIVATE).edit()
+            .putBoolean("active", false).apply()
+        DailyScheduleScheduler.cancel(this)
     }
+
 }
 
 @Composable
@@ -140,10 +120,39 @@ private fun WaterHome(
 
     var selected by remember { mutableIntStateOf(prefs.getInt("interval", 30)) }
     var active by remember { mutableStateOf(prefs.getBoolean("active", false)) }
+    var nextReminderAt by remember { mutableStateOf(prefs.getLong("next_reminder_at", 0L)) }
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(active) {
+        while (active) {
+            nextReminderAt = prefs.getLong("next_reminder_at", 0L)
+            nowMillis = System.currentTimeMillis()
+            kotlinx.coroutines.delay(30_000L)
+        }
+    }
+
+    val lifecycleOwner = androidx.lifecycle.LifecycleOwner::class.java.cast(context)!!
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                active = prefs.getBoolean("active", false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     var customMinutes by remember { mutableStateOf("") }
     var showCustomDialog by remember { mutableStateOf(false) }
     var customError by remember { mutableStateOf(false) }
 
+    var startMinute by remember { mutableIntStateOf(prefs.getInt("start_minute", 7 * 60)) }
+    var endMinute by remember { mutableIntStateOf(prefs.getInt("end_minute", 22 * 60)) }
+    fun clockLabel(value: Int): String {
+        val hour = value / 60
+        val minute = value % 60
+        return String.format(Locale.US, "%d:%02d %s", if (hour % 12 == 0) 12 else hour % 12,
+            minute, if (hour < 12) "AM" else "PM")
+    }
     val intervals = listOf(15, 30, 45, 60)
 
     Surface(
@@ -297,6 +306,7 @@ private fun WaterHome(
                             onClick = {
                                 selected = minutes
                                 prefs.edit().putInt("interval", minutes).apply()
+                                    if (active) DailyScheduleScheduler.scheduleNext(context)
                             },
                             modifier = Modifier
                                 .weight(1f)
@@ -483,6 +493,7 @@ private fun WaterHome(
                                         } else {
                                             selected = value
                                             prefs.edit().putInt("interval", value).apply()
+                                            if (active) DailyScheduleScheduler.scheduleNext(context)
                                             showCustomDialog = false
                                         }
                                     },
@@ -504,6 +515,36 @@ private fun WaterHome(
                 }
             }
 
+            Spacer(Modifier.height(12.dp))
+            Text("Daily Schedule", fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                color = Ink, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(10.dp))
+            Row(modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        TimePickerDialog(context, { _, hour, minute ->
+                            startMinute = hour * 60 + minute
+                            prefs.edit().putInt("start_minute", startMinute).apply()
+                            if (active) DailyScheduleScheduler.scheduleNext(context)
+                        }, startMinute / 60, startMinute % 60, false).show()
+                    }, modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(16.dp)
+                ) { Text("From: ${clockLabel(startMinute)}", fontSize = 12.sp) }
+                OutlinedButton(
+                    onClick = {
+                        TimePickerDialog(context, { _, hour, minute ->
+                            endMinute = hour * 60 + minute
+                            prefs.edit().putInt("end_minute", endMinute).apply()
+                            if (active) DailyScheduleScheduler.scheduleNext(context)
+                        }, endMinute / 60, endMinute % 60, false).show()
+                    }, modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(16.dp)
+                ) { Text("To: ${clockLabel(endMinute)}", fontSize = 12.sp) }
+            }
+            Text("Reminders repeat every day during these hours.",
+                color = Muted, fontSize = 11.sp)
+
             Spacer(Modifier.height(5.dp))
 
             Button(
@@ -513,7 +554,7 @@ private fun WaterHome(
                         active = false
                     } else {
                         onStart(selected)
-                        active = true
+                        active = prefs.getBoolean("active", false)
                     }
                 },
                 modifier = Modifier
@@ -551,34 +592,57 @@ private fun WaterHome(
                 textAlign = TextAlign.Center
             )
 
+            if (active && nextReminderAt > nowMillis) {
+                val target = java.util.Calendar.getInstance().apply {
+                    timeInMillis = nextReminderAt
+                }
+                val today = java.util.Calendar.getInstance().apply {
+                    timeInMillis = nowMillis
+                }
+                val isToday =
+                    target.get(java.util.Calendar.YEAR) == today.get(java.util.Calendar.YEAR) &&
+                    target.get(java.util.Calendar.DAY_OF_YEAR) == today.get(java.util.Calendar.DAY_OF_YEAR)
+                val targetMinutes =
+                    target.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+                    target.get(java.util.Calendar.MINUTE)
+                val minutesLeft =
+                    ((nextReminderAt - nowMillis + 59_999L) / 60_000L).toInt().coerceAtLeast(1)
+
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    text = "Next reminder: " +
+                        (if (isToday) "" else "Tomorrow, ") +
+                        clockLabel(targetMinutes),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = DarkBlue,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = if (minutesLeft == 1) "In 1 minute" else "In $minutesLeft minutes",
+                    fontSize = 12.sp,
+                    color = Muted,
+                    textAlign = TextAlign.Center
+                )
+            } else if (active) {
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "Calculating next reminder…",
+                    fontSize = 12.sp,
+                    color = Muted,
+                    textAlign = TextAlign.Center
+                )
+            }
+
             Spacer(Modifier.height(18.dp))
         }
     }
 }
 
 fun scheduleReminder(context: Context, minutes: Int) {
-    val intent = Intent(context, WaterReminderReceiver::class.java)
-    val pending = PendingIntent.getBroadcast(
-        context, 100, intent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-
-    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val delayMillis = minutes * 60_000L
-    val trigger = System.currentTimeMillis() + delayMillis
-
-    if (
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-        alarmManager.canScheduleExactAlarms()
-    ) {
-        alarmManager.setExactAndAllowWhileIdle(
-            AlarmManager.RTC_WAKEUP, trigger, pending
-        )
-    } else {
-        alarmManager.setAndAllowWhileIdle(
-            AlarmManager.RTC_WAKEUP, trigger, pending
-        )
-    }
+    context.getSharedPreferences("water", Context.MODE_PRIVATE).edit()
+        .putInt("interval", minutes.coerceIn(1, 1440)).apply()
+    DailyScheduleScheduler.scheduleNext(context)
 }
 
 fun createNotificationChannel(context: Context) {

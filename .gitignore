@@ -5,3 +5,6 @@ local.properties
 *.keystore
 .DS_Store
 .idea/
+keystore.properties
+backups/
+*.backup*

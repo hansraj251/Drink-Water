@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -5,16 +7,37 @@ plugins {
 }
 
 android {
+
+    signingConfigs {
+        create("release") {
+            val signingProperties = Properties()
+            val signingFile = rootProject.file("keystore.properties")
+            require(signingFile.exists()) { "Missing keystore.properties" }
+            signingFile.inputStream().use { signingProperties.load(it) }
+            storeFile = rootProject.file(signingProperties.getProperty("storeFile"))
+            storePassword = signingProperties.getProperty("storePassword")
+            keyAlias = signingProperties.getProperty("keyAlias")
+            keyPassword = signingProperties.getProperty("keyPassword")
+        }
+    }
+
     namespace = "com.drinkwater.app"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.drinkwater.app"
+        applicationId = "com.hansraj251.drinkwater"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.1.0"
     }
+
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
 
     buildFeatures {
         compose = true

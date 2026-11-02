@@ -6,11 +6,10 @@ import android.content.Intent
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
-
-        val prefs = context.getSharedPreferences("water", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("active", false)) {
-            scheduleReminder(context, prefs.getInt("interval", 30))
+        if (intent?.action == Intent.ACTION_BOOT_COMPLETED ||
+            intent?.action == Intent.ACTION_TIME_CHANGED ||
+            intent?.action == Intent.ACTION_TIMEZONE_CHANGED) {
+            DailyScheduleScheduler.scheduleNext(context)
         }
     }
 }
