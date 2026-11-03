@@ -15,7 +15,7 @@ class WaterReminderReceiver : BroadcastReceiver() {
         val prefs = context.getSharedPreferences("water", Context.MODE_PRIVATE)
         if (!prefs.getBoolean("active", false)) return
         // Queue next alarm before attempting notification delivery.
-        DailyScheduleScheduler.scheduleNext(context, afterFiring = true)
+        DailyScheduleScheduler.scheduleNext(context)
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED) return

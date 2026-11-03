@@ -1,5 +1,8 @@
 package com.drinkwater.app
 
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+
 import android.Manifest
 import android.app.AlarmManager
 import android.app.TimePickerDialog
@@ -15,8 +18,14 @@ import android.os.Bundle
 import android.provider.Settings
 import android.net.Uri
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.IntentSenderRequest
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.Scope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -54,6 +63,31 @@ class MainActivity : ComponentActivity() {
             if (granted) startSelectedReminder()
         }
 
+    private var driveStatus by mutableStateOf("Google Drive not connected")
+    private var driveMessage by mutableStateOf("")
+    private var driveBusy by mutableStateOf(false)
+    private var driveRefreshSignal by mutableIntStateOf(0)
+    private var pendingDriveAction: String? = null
+
+    private val driveAuthorizationLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.StartIntentSenderForResult()
+        ) { result ->
+            if (result.resultCode == RESULT_OK && result.data != null) {
+                try {
+                    val authResult = Identity.getAuthorizationClient(this)
+                        .getAuthorizationResultFromIntent(result.data)
+                    handleDriveAccessToken(authResult.accessToken)
+                } catch (e: Exception) {
+                    driveBusy = false
+                    driveMessage = "Google Drive authorization failed: ${e.message ?: "Unknown error"}"
+                }
+            } else {
+                driveBusy = false
+                driveMessage = "Google Drive authorization was cancelled."
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         createNotificationChannel(this)
@@ -81,8 +115,111 @@ class MainActivity : ComponentActivity() {
                             startSelectedReminder()
                         }
                     },
-                    onStop = { stopReminder() }
+                    onStop = { stopReminder() },
+                    onDriveConnect = { authorizeDrive("connect") },
+                    onDriveBackup = { authorizeDrive("backup") },
+                    onDriveRestore = { authorizeDrive("restore") },
+                    driveStatus = driveStatus,
+                    driveMessage = driveMessage,
+                    driveBusy = driveBusy,
+                    driveRefreshSignal = driveRefreshSignal
                 )
+            }
+        }
+    }
+
+    private fun authorizeDrive(action: String) {
+        if (driveBusy) return
+
+        pendingDriveAction = action
+        driveBusy = true
+        driveMessage = ""
+
+        val request = AuthorizationRequest.builder()
+            .setRequestedScopes(
+                listOf(Scope("https://www.googleapis.com/auth/drive.appdata"))
+            )
+            .build()
+
+        Identity.getAuthorizationClient(this)
+            .authorize(request)
+            .addOnSuccessListener { result ->
+                if (result.hasResolution()) {
+                    val pendingIntent = result.pendingIntent
+                    if (pendingIntent == null) {
+                        driveBusy = false
+                        driveMessage = "Google authorization did not return a consent screen."
+                    } else {
+                        try {
+                            driveAuthorizationLauncher.launch(
+                                IntentSenderRequest.Builder(
+                                    pendingIntent.intentSender
+                                ).build()
+                            )
+                        } catch (e: Exception) {
+                            driveBusy = false
+                            driveMessage = "Could not open Google authorization: ${e.message}"
+                        }
+                    }
+                } else {
+                    handleDriveAccessToken(result.accessToken)
+                }
+            }
+            .addOnFailureListener { error ->
+                driveBusy = false
+                driveMessage = "Google Drive authorization failed: ${error.message ?: "Unknown error"}"
+            }
+    }
+
+    private fun handleDriveAccessToken(accessToken: String?) {
+        if (accessToken.isNullOrBlank()) {
+            driveBusy = false
+            driveMessage = "Google did not provide a Drive access token."
+            return
+        }
+
+        val action = pendingDriveAction
+        if (action == null) {
+            driveBusy = false
+            driveMessage = "No Drive operation was selected."
+            return
+        }
+
+        lifecycleScope.launch {
+            try {
+                val manager = DriveBackupManager(
+                    applicationContext,
+                    WaterHistoryStore.getInstance(applicationContext)
+                )
+
+                when (action) {
+                    "connect" -> {
+                        driveStatus = "Google Drive authorization granted"
+                        driveMessage = "Drive access is ready. You can now back up your history."
+                    }
+
+                    "backup" -> {
+                        val result = manager.backup(accessToken)
+                        driveStatus = "Last backup: ${result.modifiedTime ?: "just now"}"
+                        driveMessage = "Backup completed successfully."
+                    }
+
+                    "restore" -> {
+                        val count = manager.restore(accessToken)
+                        driveRefreshSignal++
+                        driveStatus = "History restored from Google Drive"
+                        driveMessage = "$count days of water history restored successfully."
+                    }
+
+                    else -> {
+                        driveMessage = "Unknown Drive operation."
+                    }
+                }
+            } catch (e: Exception) {
+                driveMessage = "Drive operation failed: ${e.message ?: "Unknown error"}"
+            } finally {
+                driveBusy = false
+                pendingDriveAction = null
             }
         }
     }
@@ -111,7 +248,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun WaterHome(
     onStart: (Int) -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    onDriveConnect: () -> Unit,
+    onDriveBackup: () -> Unit,
+    onDriveRestore: () -> Unit,
+    driveStatus: String,
+    driveMessage: String,
+    driveBusy: Boolean,
+    driveRefreshSignal: Int
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember {
@@ -120,13 +264,27 @@ private fun WaterHome(
 
     var selected by remember { mutableIntStateOf(prefs.getInt("interval", 30)) }
     var active by remember { mutableStateOf(prefs.getBoolean("active", false)) }
+    var selectedTab by remember { mutableStateOf("Reminder") }
+    var showProfile by remember { mutableStateOf(false) }
+    var showRestoreConfirmation by remember { mutableStateOf(false) }
+    androidx.activity.compose.BackHandler(enabled = showProfile) {
+        showProfile = false
+    }
     var nextReminderAt by remember { mutableStateOf(prefs.getLong("next_reminder_at", 0L)) }
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(active) {
         while (active) {
+            nowMillis = System.currentTimeMillis()
+
+            val savedNext = prefs.getLong("next_reminder_at", 0L)
+            if (savedNext <= 0L || savedNext < nowMillis - 120_000L) {
+                DailyScheduleScheduler.ensureNextScheduled(context)
+            }
+
             nextReminderAt = prefs.getLong("next_reminder_at", 0L)
             nowMillis = System.currentTimeMillis()
+
             kotlinx.coroutines.delay(30_000L)
         }
     }
@@ -136,6 +294,11 @@ private fun WaterHome(
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 active = prefs.getBoolean("active", false)
+                if (active) {
+                    DailyScheduleScheduler.ensureNextScheduled(context)
+                    nextReminderAt = prefs.getLong("next_reminder_at", 0L)
+                    nowMillis = System.currentTimeMillis()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -167,6 +330,13 @@ private fun WaterHome(
                 .navigationBarsPadding(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                if (selectedTab == "Reminder") {
             Spacer(Modifier.height(32.dp))
 
             Row(
@@ -222,59 +392,7 @@ private fun WaterHome(
 
             Spacer(Modifier.height(32.dp))
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f, fill = false)
-                    .heightIn(min = 235.dp, max = 280.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0xFFE1F1FF), Color(0xFFF0F8FF))
-                        ),
-                        RoundedCornerShape(32.dp)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 12.dp)
-                            .size(116.dp)
-                            .background(Color.White.copy(alpha = 0.8f), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Rounded.WaterDrop,
-                            contentDescription = "Water drop",
-                            tint = Blue,
-                            modifier = Modifier.size(75.dp)
-                        )
-                    }
 
-                    Spacer(Modifier.height(19.dp))
-
-                    Text(
-                        "A little water,",
-                        fontSize = 25.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Ink
-                    )
-                    Text(
-                        "a healthier you.",
-                        fontSize = 25.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Blue
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Text(
-                        "Build a healthy hydration habit.",
-                        fontSize = 13.sp,
-                        color = Muted
-                    )
-                }
-            }
 
             Spacer(Modifier.height(27.dp))
 
@@ -635,7 +753,645 @@ private fun WaterHome(
             }
 
             Spacer(Modifier.height(18.dp))
+
+                } else if (showProfile) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = Color(0xFFF5FAFF)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TextButton(onClick = { showProfile = false }) {
+                                    Text("←", fontSize = 28.sp, color = Ink)
+                                }
+                                Text(
+                                    "Profile",
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Ink
+                                )
+                            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                color = Color.White
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        "Google Drive Backup",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Ink
+                    )
+
+                    Spacer(Modifier.height(5.dp))
+
+                    Text(
+                        driveStatus,
+                        fontSize = 12.sp,
+                        color = Muted
+                    )
+
+                    if (driveMessage.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            driveMessage,
+                            fontSize = 12.sp,
+                            color = Blue
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    OutlinedButton(
+                        onClick = onDriveConnect,
+                        enabled = !driveBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Connect Google Drive")
+                    }
+
+                    OutlinedButton(
+                        onClick = onDriveBackup,
+                        enabled = !driveBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Backup Now")
+                    }
+
+                    OutlinedButton(
+                        onClick = { showRestoreConfirmation = true },
+                        enabled = !driveBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Restore Backup")
+                    }
+
+                    if (driveBusy) {
+                        Spacer(Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+                        }
+                    }
+                } else {
+                    DailyGoalScreen(
+                        onOpenProfile = { showProfile = true },
+                        onDriveConnect = onDriveConnect,
+                        onDriveBackup = onDriveBackup,
+                        onDriveRestore = onDriveRestore,
+                        driveStatus = driveStatus,
+                        driveMessage = driveMessage,
+                        driveBusy = driveBusy,
+                        driveRefreshSignal = driveRefreshSignal
+                    )
+                }
+            }
+
+
+        if (showRestoreConfirmation) {
+            AlertDialog(
+                onDismissRequest = { showRestoreConfirmation = false },
+                title = { Text("Restore water history?", color = Ink) },
+                text = {
+                    Text(
+                        "This will replace the current water history with the backup from Google Drive. A local safety copy will be created before replacement.",
+                        color = Muted
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showRestoreConfirmation = false
+                            onDriveRestore()
+                        },
+                        enabled = !driveBusy
+                    ) {
+                        Text("Restore")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showRestoreConfirmation = false }
+                    ) {
+                        Text("Cancel")
+                    }
+                },
+                containerColor = Color.White
+            )
         }
+
+
+            NavigationBar(
+                containerColor = Color(0xFFF5FAFF),
+                tonalElevation = 0.dp
+            ) {
+                NavigationBarItem(
+                    selected = selectedTab == "Reminder",
+                    onClick = { selectedTab = "Reminder" },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color(0xFF2196F3),
+                        selectedTextColor = Color(0xFF2196F3),
+                        indicatorColor = Color(0xFFDCEEFF)
+                    ),
+                    icon = {
+                        Icon(
+                            Icons.Rounded.NotificationsActive,
+                            contentDescription = "Reminder"
+                        )
+                    },
+                    label = { Text("Reminder") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == "Daily Goal",
+                    onClick = { selectedTab = "Daily Goal" },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color(0xFF2196F3),
+                        selectedTextColor = Color(0xFF2196F3),
+                        indicatorColor = Color(0xFFDCEEFF)
+                    ),
+                    icon = {
+                        Icon(
+                            Icons.Rounded.WaterDrop,
+                            contentDescription = "Daily Goal"
+                        )
+                    },
+                    label = { Text("Daily Goal") }
+                )
+            }
+
+        }
+    }
+}
+
+
+@Composable
+private fun DailyGoalScreen(
+    onOpenProfile: () -> Unit,
+    onDriveConnect: () -> Unit,
+    onDriveBackup: () -> Unit,
+    onDriveRestore: () -> Unit,
+    driveStatus: String,
+    driveMessage: String,
+    driveBusy: Boolean,
+    driveRefreshSignal: Int
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    val prefs = remember {
+        context.getSharedPreferences("water_tracker", Context.MODE_PRIVATE)
+    }
+
+    val store = remember {
+        WaterHistoryStore.getInstance(context).also {
+            it.migrateLegacyData(context)
+        }
+    }
+
+    val todayKey = remember { WaterHistoryStore.todayKey() }
+
+    val initialGoal = remember {
+        prefs.getInt("daily_goal_ml", 2000).coerceIn(250, 10000)
+    }
+
+    val initialDay = remember {
+        store.getOrCreateToday(initialGoal)
+    }
+
+    var intake by remember {
+        mutableIntStateOf(initialDay.intakeMl)
+    }
+
+    var goal by remember {
+        mutableIntStateOf(initialDay.goalMl ?: initialGoal)
+    }
+
+    var history by remember {
+        mutableStateOf(store.getHistory())
+    }
+
+    var lastAdded by remember { mutableIntStateOf(0) }
+    var goalInput by remember { mutableStateOf(goal.toString()) }
+    var customInput by remember { mutableStateOf("") }
+    var showGoalDialog by remember { mutableStateOf(false) }
+    var showCustomDialog by remember { mutableStateOf(false) }
+
+    fun refreshHistory() {
+        history = store.getHistory()
+    }
+
+    LaunchedEffect(driveRefreshSignal) {
+        if (driveRefreshSignal > 0) {
+            val restoredToday = store.getOrCreateToday(goal)
+            intake = restoredToday.intakeMl
+            goal = restoredToday.goalMl ?: goal
+            refreshHistory()
+        }
+    }
+
+    fun saveIntake(value: Int) {
+        val safeValue = value.coerceAtLeast(0)
+        val updated = store.setIntake(todayKey, safeValue, goal)
+        intake = updated.intakeMl
+        refreshHistory()
+    }
+
+    val progress =
+        (intake.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val remaining = (goal - intake).coerceAtLeast(0)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(top = 20.dp, bottom = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Daily Goal",
+                modifier = Modifier.weight(1f),
+                fontSize = 25.sp,
+                fontWeight = FontWeight.Bold,
+                color = Ink
+            )
+            TextButton(onClick = onOpenProfile) {
+                Text("👤", fontSize = 24.sp)
+            }
+        }
+
+        Spacer(Modifier.height(5.dp))
+
+        Text(
+            "Your daily hydration progress",
+            fontSize = 13.sp,
+            color = Muted
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        Spacer(Modifier.height(22.dp))
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(26.dp),
+            color = Color.White
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier.size(165.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxSize(),
+                        strokeWidth = 12.dp,
+                        color = Blue,
+                        trackColor = PaleBlue
+                    )
+
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Rounded.WaterDrop,
+                            contentDescription = null,
+                            tint = Blue,
+                            modifier = Modifier.size(30.dp)
+                        )
+
+                        Text(
+                            "$intake ml",
+                            fontSize = 25.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Ink
+                        )
+
+                        Text("consumed", fontSize = 12.sp, color = Muted)
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    if (intake >= goal) {
+                        "Daily goal completed!"
+                    } else {
+                        "$remaining ml remaining"
+                    },
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Ink
+                )
+
+                Text(
+                    "${(progress * 100).toInt()}% of daily goal",
+                    fontSize = 13.sp,
+                    color = Muted
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        goalInput = goal.toString()
+                        showGoalDialog = true
+                    },
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text("Daily target: $goal ml  ·  Edit")
+                }
+            }
+        }
+
+        Spacer(Modifier.height(22.dp))
+
+        Text(
+            "Add Water",
+            modifier = Modifier.fillMaxWidth(),
+            fontSize = 19.sp,
+            fontWeight = FontWeight.Bold,
+            color = Ink
+        )
+
+        Spacer(Modifier.height(10.dp))
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            listOf(150, 250, 500).forEach { amount ->
+                OutlinedButton(
+                    onClick = {
+                        lastAdded = amount
+                        saveIntake(intake + amount)
+                    },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(
+                        horizontal = 3.dp,
+                        vertical = 10.dp
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text("+$amount ml", fontSize = 12.sp)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            OutlinedButton(
+                onClick = {
+                    customInput = ""
+                    showCustomDialog = true
+                },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("Custom amount")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    if (lastAdded > 0 && intake > 0) {
+                        saveIntake(intake - lastAdded)
+                        lastAdded = 0
+                    }
+                },
+                enabled = lastAdded > 0 && intake > 0,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("Undo last")
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "History",
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                color = Ink
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "${history.size} days",
+                fontSize = 12.sp,
+                color = Muted
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        if (history.isEmpty()) {
+            Text(
+                "No intake history available yet.",
+                modifier = Modifier.fillMaxWidth(),
+                color = Muted,
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center
+            )
+        } else {
+            history.forEach { day ->
+                val displayDate = runCatching {
+                    val parsed = java.text.SimpleDateFormat(
+                        "yyyy-MM-dd",
+                        Locale.US
+                    ).parse(day.date)
+
+                    if (parsed != null) {
+                        java.text.SimpleDateFormat(
+                            "dd MMM yyyy",
+                            Locale.getDefault()
+                        ).format(parsed)
+                    } else {
+                        day.date
+                    }
+                }.getOrDefault(day.date)
+
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    shape = RoundedCornerShape(15.dp),
+                    color = Color.White
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                displayDate,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Ink
+                            )
+
+                            Spacer(Modifier.height(4.dp))
+
+                            Text(
+                                if (day.goalMl != null) {
+                                    "${day.intakeMl} / ${day.goalMl} ml  ·  ${day.percentage}%"
+                                } else {
+                                    "${day.intakeMl} ml  ·  Goal not recorded"
+                                },
+                                fontSize = 12.sp,
+                                color = Muted
+                            )
+                        }
+
+                        if (day.goalMl != null) {
+                            Text(
+                                if (day.completed) "Completed" else "In progress",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (day.completed) {
+                                    Color(0xFF238653)
+                                } else {
+                                    Blue
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showGoalDialog) {
+        AlertDialog(
+            onDismissRequest = { showGoalDialog = false },
+            title = { Text("Set Daily Goal", color = Ink) },
+            text = {
+                OutlinedTextField(
+                    value = goalInput,
+                    onValueChange = {
+                        goalInput = it.filter(Char::isDigit).take(5)
+                    },
+                    label = { Text("Goal in ml (250–10000)") },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number
+                    ),
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                OutlinedButton(
+                    onClick = {
+                        val value = goalInput.toIntOrNull()
+                        if (value != null && value in 250..10000) {
+                            store.setGoal(todayKey, value)
+                            goal = value
+                            prefs.edit()
+                                .putInt("daily_goal_ml", goal)
+                                .apply()
+                            refreshHistory()
+                            showGoalDialog = false
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Ink),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Ink
+                    )
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showGoalDialog = false },
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Ink),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Ink
+                    )
+                ) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = Color.White
+        )
+    }
+
+    if (showCustomDialog) {
+        AlertDialog(
+            onDismissRequest = { showCustomDialog = false },
+            title = { Text("Add Water", color = Ink) },
+            text = {
+                OutlinedTextField(
+                    value = customInput,
+                    onValueChange = {
+                        customInput = it.filter(Char::isDigit).take(5)
+                    },
+                    label = { Text("Amount in ml") },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number
+                    ),
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                OutlinedButton(
+                    onClick = {
+                        val amount = customInput.toIntOrNull()
+                        if (amount != null && amount in 1..5000) {
+                            lastAdded = amount
+                            saveIntake(intake + amount)
+                            showCustomDialog = false
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Ink),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Ink
+                    )
+                ) {
+                    Text("Add")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showCustomDialog = false },
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Ink),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Ink
+                    )
+                ) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = Color.White
+        )
     }
 }
 
