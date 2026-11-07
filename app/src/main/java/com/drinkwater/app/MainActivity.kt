@@ -187,10 +187,7 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             try {
-                val manager = DriveBackupManager(
-                    applicationContext,
-                    WaterHistoryStore.getInstance(applicationContext)
-                )
+                val manager = DriveBackupManager(applicationContext)
 
                 when (action) {
                     "connect" -> {
@@ -763,6 +760,7 @@ private fun WaterHome(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .verticalScroll(rememberScrollState())
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -778,6 +776,8 @@ private fun WaterHome(
                                     color = Ink
                                 )
                             }
+
+            HealthProfileSection()
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -957,31 +957,39 @@ private fun DailyGoalScreen(
     }
 
     val store = remember {
-        WaterHistoryStore.getInstance(context).also {
-            it.migrateLegacyData(context)
-        }
+        com.drinkwater.app.data.WaterHealthRepository(
+            com.drinkwater.app.data.DrinkWaterDatabase.getInstance(context)
+        )
     }
 
+    val scope = rememberCoroutineScope()
     val todayKey = remember { WaterHistoryStore.todayKey() }
 
     val initialGoal = remember {
         prefs.getInt("daily_goal_ml", 2000).coerceIn(250, 10000)
     }
 
-    val initialDay = remember {
-        store.getOrCreateToday(initialGoal)
+    var intake by remember { mutableIntStateOf(0) }
+    var goal by remember { mutableIntStateOf(initialGoal) }
+    var history by remember { mutableStateOf<List<WaterDay>>(emptyList()) }
+
+    fun convertDay(day: com.drinkwater.app.data.WaterDayEntity): WaterDay {
+        return WaterDay(
+            date = day.date,
+            intakeMl = day.intakeMl,
+            goalMl = day.goalMl
+        )
     }
 
-    var intake by remember {
-        mutableIntStateOf(initialDay.intakeMl)
+    suspend fun loadTodayAndHistory() {
+        val day = store.getOrCreateToday(todayKey, goal)
+        intake = day.intakeMl
+        goal = day.goalMl ?: goal
+        history = store.getWaterHistory().map(::convertDay)
     }
 
-    var goal by remember {
-        mutableIntStateOf(initialDay.goalMl ?: initialGoal)
-    }
-
-    var history by remember {
-        mutableStateOf(store.getHistory())
+    LaunchedEffect(Unit) {
+        loadTodayAndHistory()
     }
 
     var lastAdded by remember { mutableIntStateOf(0) }
@@ -991,23 +999,24 @@ private fun DailyGoalScreen(
     var showCustomDialog by remember { mutableStateOf(false) }
 
     fun refreshHistory() {
-        history = store.getHistory()
+        scope.launch {
+            history = store.getWaterHistory().map(::convertDay)
+        }
     }
 
     LaunchedEffect(driveRefreshSignal) {
         if (driveRefreshSignal > 0) {
-            val restoredToday = store.getOrCreateToday(goal)
-            intake = restoredToday.intakeMl
-            goal = restoredToday.goalMl ?: goal
-            refreshHistory()
+            loadTodayAndHistory()
         }
     }
 
     fun saveIntake(value: Int) {
         val safeValue = value.coerceAtLeast(0)
-        val updated = store.setIntake(todayKey, safeValue, goal)
-        intake = updated.intakeMl
-        refreshHistory()
+        scope.launch {
+            val updated = store.setIntake(todayKey, safeValue, goal)
+            intake = updated.intakeMl
+            refreshHistory()
+        }
     }
 
     val progress =
@@ -1308,13 +1317,15 @@ private fun DailyGoalScreen(
                     onClick = {
                         val value = goalInput.toIntOrNull()
                         if (value != null && value in 250..10000) {
-                            store.setGoal(todayKey, value)
-                            goal = value
-                            prefs.edit()
-                                .putInt("daily_goal_ml", goal)
-                                .apply()
-                            refreshHistory()
-                            showGoalDialog = false
+                            scope.launch {
+                                val updated = store.setGoal(todayKey, value)
+                                goal = updated.goalMl ?: value
+                                prefs.edit()
+                                    .putInt("daily_goal_ml", goal)
+                                    .apply()
+                                refreshHistory()
+                                showGoalDialog = false
+                            }
                         }
                     },
                     shape = RoundedCornerShape(12.dp),
@@ -1392,6 +1403,321 @@ private fun DailyGoalScreen(
             },
             containerColor = Color.White
         )
+    }
+}
+
+
+@Composable
+private fun HealthProfileSection() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val repository = remember(context) {
+        com.drinkwater.app.data.WaterHealthRepository(
+            com.drinkwater.app.data.DrinkWaterDatabase.getInstance(context.applicationContext)
+        )
+    }
+    val scope = rememberCoroutineScope()
+
+    var name by remember { mutableStateOf("") }
+    var age by remember { mutableStateOf("") }
+    var sex by remember { mutableStateOf("Prefer not to say") }
+    var height by remember { mutableStateOf("") }
+    var weight by remember { mutableStateOf("") }
+    var activity by remember { mutableStateOf("Sedentary") }
+    var averageSteps by remember { mutableStateOf("0") }
+
+    var waterOverride by remember { mutableStateOf("") }
+    var stepsOverride by remember { mutableStateOf("") }
+    var minutesOverride by remember { mutableStateOf("") }
+
+    var expandedSex by remember { mutableStateOf(false) }
+    var expandedActivity by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf("") }
+
+    val activityOptions = listOf(
+        "Sedentary",
+        "Lightly Active",
+        "Moderately Active",
+        "Very Active"
+    )
+    val sexOptions = listOf(
+        "Male",
+        "Female",
+        "Prefer not to say"
+    )
+
+    LaunchedEffect(Unit) {
+        val profile = repository.getHealthProfile()
+        if (profile != null) {
+            name = profile.name
+            age = profile.age.toString()
+            sex = profile.sex
+            height = profile.heightCm.toString()
+            weight = profile.weightKg.toString()
+            activity = profile.activityLevel
+            averageSteps = profile.averageDailySteps.toString()
+            waterOverride = profile.waterGoalOverrideMl?.toString() ?: ""
+            stepsOverride = profile.stepsGoalOverride?.toString() ?: ""
+            minutesOverride = profile.walkingMinutesOverride?.toString() ?: ""
+        }
+        loaded = true
+    }
+
+    val ageValue = age.toIntOrNull()
+    val heightValue = height.toIntOrNull()
+    val weightValue = weight.toDoubleOrNull()
+    val stepsValue = averageSteps.toIntOrNull()
+
+    val previewProfile = if (
+        ageValue != null && heightValue != null &&
+        weightValue != null && stepsValue != null
+    ) {
+        runCatching {
+            com.drinkwater.app.data.HealthProfileEntity(
+                name = name.trim(),
+                age = ageValue,
+                sex = sex,
+                heightCm = heightValue,
+                weightKg = weightValue,
+                activityLevel = activity,
+                averageDailySteps = stepsValue,
+                waterGoalOverrideMl = waterOverride.toIntOrNull(),
+                stepsGoalOverride = stepsOverride.toIntOrNull(),
+                walkingMinutesOverride = minutesOverride.toIntOrNull()
+            )
+        }.getOrNull()
+    } else null
+
+    val previewGoals = previewProfile?.let {
+        com.drinkwater.app.data.HealthGoalCalculator.calculate(it)
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.White
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                "Health Profile",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Ink
+            )
+
+            Text("Personal Information", fontWeight = FontWeight.SemiBold, color = Ink)
+
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name (optional)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            OutlinedTextField(
+                value = age,
+                onValueChange = { age = it.filter(Char::isDigit).take(3) },
+                label = { Text("Age (13–110 years)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true
+            )
+
+            Box {
+                OutlinedButton(
+                    onClick = { expandedSex = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Sex: $sex")
+                }
+                DropdownMenu(
+                    expanded = expandedSex,
+                    onDismissRequest = { expandedSex = false }
+                ) {
+                    sexOptions.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option) },
+                            onClick = {
+                                sex = option
+                                expandedSex = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider()
+
+            Text("Body Details", fontWeight = FontWeight.SemiBold, color = Ink)
+
+            OutlinedTextField(
+                value = height,
+                onValueChange = { height = it.filter(Char::isDigit).take(3) },
+                label = { Text("Height (cm)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true
+            )
+
+            OutlinedTextField(
+                value = weight,
+                onValueChange = { weight = it.filter { c -> c.isDigit() || c == '.' }.take(6) },
+                label = { Text("Weight (kg)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true
+            )
+
+            HorizontalDivider()
+
+            Text("Activity Information", fontWeight = FontWeight.SemiBold, color = Ink)
+
+            Box {
+                OutlinedButton(
+                    onClick = { expandedActivity = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Activity: $activity")
+                }
+                DropdownMenu(
+                    expanded = expandedActivity,
+                    onDismissRequest = { expandedActivity = false }
+                ) {
+                    activityOptions.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option) },
+                            onClick = {
+                                activity = option
+                                expandedActivity = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = averageSteps,
+                onValueChange = { averageSteps = it.filter(Char::isDigit).take(6) },
+                label = { Text("Average daily steps") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true
+            )
+
+            HorizontalDivider()
+
+            Text("Your Daily Goals", fontWeight = FontWeight.SemiBold, color = Ink)
+
+            if (previewGoals != null) {
+                Text("Suggested water goal: ${previewGoals.waterMl} ml", color = Blue)
+                Text("Suggested steps: ${previewGoals.steps}", color = Blue)
+                Text("Suggested walking: ${previewGoals.walkingMinutes} minutes", color = Blue)
+            } else {
+                Text("Enter valid profile details to calculate your goals.", color = Muted)
+            }
+
+            OutlinedTextField(
+                value = waterOverride,
+                onValueChange = { waterOverride = it.filter(Char::isDigit).take(5) },
+                label = { Text("Water goal override (ml, optional)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true
+            )
+
+            OutlinedTextField(
+                value = stepsOverride,
+                onValueChange = { stepsOverride = it.filter(Char::isDigit).take(6) },
+                label = { Text("Steps goal override (optional)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true
+            )
+
+            OutlinedTextField(
+                value = minutesOverride,
+                onValueChange = { minutesOverride = it.filter(Char::isDigit).take(4) },
+                label = { Text("Walking minutes override (optional)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true
+            )
+
+            Text(
+                "These are general wellness estimates, not medical advice. Follow your doctor's instructions if you have a prescribed fluid restriction.",
+                fontSize = 12.sp,
+                color = Muted
+            )
+
+            Button(
+                onClick = {
+                    val a = age.toIntOrNull()
+                    val h = height.toIntOrNull()
+                    val w = weight.toDoubleOrNull()
+                    val steps = averageSteps.toIntOrNull()
+                    val water = waterOverride.toIntOrNull()
+                    val stepGoal = stepsOverride.toIntOrNull()
+                    val minutes = minutesOverride.toIntOrNull()
+
+                    val valid =
+                        a != null && a in 13..110 &&
+                        h != null && h in 100..250 &&
+                        w != null && w in 30.0..200.0 &&
+                        steps != null && steps in 0..50000 &&
+                        (waterOverride.isBlank() || water != null && water in 1500..4000) &&
+                        (stepsOverride.isBlank() || stepGoal != null && stepGoal in 500..30000) &&
+                        (minutesOverride.isBlank() || minutes != null && minutes in 1..600)
+
+                    if (!valid) {
+                        message = "Please check the entered values and goal overrides."
+                    } else {
+                        saving = true
+                        message = ""
+                        scope.launch {
+                            try {
+                                val profile = com.drinkwater.app.data.HealthProfileEntity(
+                                    name = name.trim(),
+                                    age = a!!,
+                                    sex = sex,
+                                    heightCm = h!!,
+                                    weightKg = w!!,
+                                    activityLevel = activity,
+                                    averageDailySteps = steps!!,
+                                    waterGoalOverrideMl = water,
+                                    stepsGoalOverride = stepGoal,
+                                    walkingMinutesOverride = minutes
+                                )
+                                repository.saveHealthProfile(profile)
+
+                                val goals = com.drinkwater.app.data.HealthGoalCalculator.calculate(profile)
+                                val today = WaterHistoryStore.todayKey()
+                                repository.setGoal(today, goals.waterMl)
+                                context.getSharedPreferences("water_tracker", Context.MODE_PRIVATE).edit().putInt("daily_goal_ml", goals.waterMl).apply()
+
+                                message = "Profile and daily goals saved."
+                            } catch (e: Exception) {
+                                message = "Unable to save profile: ${e.message ?: "Unknown error"}"
+                            } finally {
+                                saving = false
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = loaded && !saving
+            ) {
+                Text(if (saving) "Saving…" else "Save / Update Profile")
+            }
+
+            if (message.isNotBlank()) {
+                Text(message, color = if (message.startsWith("Unable")) Color(0xFFB3261E) else Blue)
+            }
+        }
     }
 }
 
