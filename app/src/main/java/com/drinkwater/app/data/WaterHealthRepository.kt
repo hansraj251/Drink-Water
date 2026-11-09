@@ -1,0 +1,157 @@
+package com.drinkwater.app.data
+
+import androidx.room.withTransaction
+
+data class WaterBackupSnapshot(
+    val days: List<WaterDayEntity>,
+    val healthProfile: HealthProfileEntity?,
+    val dailyActivity: List<DailyActivityEntity>
+)
+
+class WaterHealthRepository(
+    private val database: DrinkWaterDatabase
+) {
+    private val dao = database.dao()
+
+    suspend fun getWaterHistory(): List<WaterDayEntity> =
+        dao.getWaterHistory()
+
+    suspend fun getWaterDay(date: String): WaterDayEntity? =
+        dao.getWaterDay(date)
+
+    suspend fun getOrCreateToday(date: String, goalMl: Int): WaterDayEntity {
+        val safeGoal = goalMl.coerceIn(250, 10000)
+        return database.withTransaction {
+            dao.insertWaterDay(
+                WaterDayEntity(date = date, intakeMl = 0, goalMl = safeGoal)
+            )
+            dao.getWaterDay(date)
+                ?: error("Unable to create today's water record.")
+        }
+    }
+
+    suspend fun setIntake(
+        date: String,
+        intakeMl: Int,
+        goalMl: Int
+    ): WaterDayEntity {
+        require(intakeMl >= 0)
+        return database.withTransaction {
+            dao.insertWaterDay(
+                WaterDayEntity(
+                    date = date,
+                    intakeMl = 0,
+                    goalMl = goalMl.coerceIn(250, 10000)
+                )
+            )
+            dao.updateWaterIntake(date, intakeMl)
+            dao.getWaterDay(date)
+                ?: error("Unable to read updated water record.")
+        }
+    }
+
+    suspend fun addIntake(
+        date: String,
+        amountMl: Int,
+        goalMl: Int
+    ): WaterDayEntity {
+        require(amountMl >= 0)
+        return database.withTransaction {
+            val current = dao.getWaterDay(date)
+            val updatedIntake = (current?.intakeMl ?: 0) + amountMl
+            dao.insertWaterDay(
+                WaterDayEntity(
+                    date = date,
+                    intakeMl = 0,
+                    goalMl = goalMl.coerceIn(250, 10000)
+                )
+            )
+            dao.updateWaterIntake(date, updatedIntake)
+            dao.getWaterDay(date)
+                ?: error("Unable to read updated water record.")
+        }
+    }
+
+    suspend fun setGoal(date: String, goalMl: Int): WaterDayEntity {
+        require(goalMl in 250..10000)
+        return database.withTransaction {
+            dao.insertWaterDay(
+                WaterDayEntity(date = date, intakeMl = 0, goalMl = goalMl)
+            )
+            dao.updateWaterGoal(date, goalMl)
+            dao.getWaterDay(date)
+                ?: error("Unable to read updated water record.")
+        }
+    }
+
+    suspend fun saveWaterDay(day: WaterDayEntity) =
+        dao.replaceWaterDay(day)
+
+    suspend fun insertWaterDay(day: WaterDayEntity) =
+        dao.insertWaterDay(day)
+
+    suspend fun updateWaterIntake(date: String, intakeMl: Int) =
+        dao.updateWaterIntake(date, intakeMl)
+
+    suspend fun updateWaterGoal(date: String, goalMl: Int) =
+        dao.updateWaterGoal(date, goalMl)
+
+    suspend fun getHealthProfile(): HealthProfileEntity? =
+        dao.getHealthProfile()
+
+    suspend fun saveHealthProfile(profile: HealthProfileEntity) =
+        dao.saveHealthProfile(profile)
+
+    suspend fun getDailyActivity(date: String): DailyActivityEntity? =
+        dao.getDailyActivity(date)
+
+    suspend fun getAllDailyActivity(): List<DailyActivityEntity> =
+        dao.getAllDailyActivity()
+
+    suspend fun saveDailyActivity(activity: DailyActivityEntity) =
+        dao.saveDailyActivity(activity)
+
+    suspend fun createBackupSnapshot(): WaterBackupSnapshot =
+        database.withTransaction {
+            WaterBackupSnapshot(
+                days = dao.getWaterHistory(),
+                healthProfile = dao.getHealthProfile(),
+                dailyActivity = dao.getAllDailyActivity()
+            )
+        }
+
+    /**
+     * Schema v1 restore: replace water history only.
+     * Existing health profile and activity remain untouched.
+     */
+    suspend fun restoreV1(days: List<WaterDayEntity>) {
+        require(days.isNotEmpty()) { "Backup contains no water history." }
+
+        database.withTransaction {
+            dao.deleteAllWaterHistory()
+            days.forEach { dao.replaceWaterDay(it) }
+        }
+    }
+
+    /**
+     * Schema v2 restore: replace all backed-up data atomically.
+     * Validate the complete payload before calling this method.
+     */
+    suspend fun restoreV2(snapshot: WaterBackupSnapshot) {
+        database.withTransaction {
+            dao.deleteAllWaterHistory()
+            dao.deleteHealthProfile()
+            dao.deleteAllDailyActivity()
+
+            snapshot.days.forEach { dao.replaceWaterDay(it) }
+
+            snapshot.healthProfile?.let {
+                dao.saveHealthProfile(it)
+            }
+
+            snapshot.dailyActivity.forEach {
+                dao.saveDailyActivity(it)
+            }
+        }
+    }
+}
