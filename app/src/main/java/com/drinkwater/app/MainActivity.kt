@@ -1,6 +1,8 @@
 package com.drinkwater.app
 
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 
 import android.Manifest
@@ -33,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -61,6 +64,21 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.RequestPermission()
         ) { granted ->
             if (granted) startSelectedReminder()
+        }
+
+    private val stepTrackingPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            val prefs = getSharedPreferences("step_tracking", MODE_PRIVATE)
+            prefs.edit().putBoolean("permission_requested", true).apply()
+
+            if (granted) {
+                prefs.edit().putBoolean("enabled", true).apply()
+                StepTrackingService.start(this)
+            } else {
+                prefs.edit().putBoolean("enabled", false).apply()
+            }
         }
 
     private var driveStatus by mutableStateOf("Google Drive not connected")
@@ -125,6 +143,31 @@ class MainActivity : ComponentActivity() {
                     driveRefreshSignal = driveRefreshSignal
                 )
             }
+        }
+        ensureStepTrackingStarted()
+    }
+
+    private fun ensureStepTrackingStarted() {
+        val prefs = getSharedPreferences("step_tracking", MODE_PRIVATE)
+
+        val permissionGranted =
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACTIVITY_RECOGNITION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (permissionGranted) {
+            prefs.edit()
+                .putBoolean("enabled", true)
+                .apply()
+            StepTrackingService.start(this)
+        } else if (!prefs.getBoolean("permission_requested", false)) {
+            prefs.edit()
+                .putBoolean("permission_requested", true)
+                .apply()
+            stepTrackingPermissionLauncher.launch(
+                Manifest.permission.ACTIVITY_RECOGNITION
+            )
         }
     }
 
@@ -262,10 +305,9 @@ private fun WaterHome(
     var selected by remember { mutableIntStateOf(prefs.getInt("interval", 30)) }
     var active by remember { mutableStateOf(prefs.getBoolean("active", false)) }
     var selectedTab by remember { mutableStateOf("Reminder") }
-    var showProfile by remember { mutableStateOf(false) }
     var showRestoreConfirmation by remember { mutableStateOf(false) }
-    androidx.activity.compose.BackHandler(enabled = showProfile) {
-        showProfile = false
+    androidx.activity.compose.BackHandler(enabled = selectedTab == "Profile") {
+        selectedTab = "Daily Goal"
     }
     var nextReminderAt by remember { mutableStateOf(prefs.getLong("next_reminder_at", 0L)) }
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -751,7 +793,7 @@ private fun WaterHome(
 
             Spacer(Modifier.height(18.dp))
 
-                } else if (showProfile) {
+                } else if (selectedTab == "Profile") {
                     Surface(
                         modifier = Modifier.fillMaxSize(),
                         color = Color(0xFFF5FAFF)
@@ -759,33 +801,22 @@ private fun WaterHome(
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .padding(horizontal = 4.dp, vertical = 4.dp)
                                 .verticalScroll(rememberScrollState())
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TextButton(onClick = { showProfile = false }) {
-                                    Text("←", fontSize = 28.sp, color = Ink)
-                                }
-                                Text(
-                                    "Profile",
-                                    fontSize = 22.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Ink
-                                )
-                            }
+
 
             HealthProfileSection()
 
+            Spacer(Modifier.height(12.dp))
+
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(14.dp),
                 color = Color.White
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp)
+                    modifier = Modifier.padding(10.dp)
                 ) {
                     Text(
                         "Google Drive Backup",
@@ -850,7 +881,7 @@ private fun WaterHome(
                     }
                 } else {
                     DailyGoalScreen(
-                        onOpenProfile = { showProfile = true },
+                        onOpenProfile = { selectedTab = "Profile" },
                         onDriveConnect = onDriveConnect,
                         onDriveBackup = onDriveBackup,
                         onDriveRestore = onDriveRestore,
@@ -932,6 +963,22 @@ private fun WaterHome(
                     },
                     label = { Text("Daily Goal") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == "Profile",
+                    onClick = { selectedTab = "Profile" },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color(0xFF2196F3),
+                        selectedTextColor = Color(0xFF2196F3),
+                        indicatorColor = Color(0xFFDCEEFF)
+                    ),
+                    icon = {
+                        Icon(
+                            Icons.Rounded.Person,
+                            contentDescription = "Profile"
+                        )
+                    },
+                    label = { Text("Profile") }
+                )
             }
 
         }
@@ -972,6 +1019,12 @@ private fun DailyGoalScreen(
     var intake by remember { mutableIntStateOf(0) }
     var goal by remember { mutableIntStateOf(initialGoal) }
     var history by remember { mutableStateOf<List<WaterDay>>(emptyList()) }
+    var todayActivity by remember {
+        mutableStateOf<com.drinkwater.app.data.DailyActivityEntity?>(null)
+    }
+    var activityProfile by remember {
+        mutableStateOf<com.drinkwater.app.data.HealthProfileEntity?>(null)
+    }
 
     fun convertDay(day: com.drinkwater.app.data.WaterDayEntity): WaterDay {
         return WaterDay(
@@ -992,11 +1045,38 @@ private fun DailyGoalScreen(
         loadTodayAndHistory()
     }
 
+    LaunchedEffect(todayKey) {
+        while (true) {
+            todayActivity = store.getDailyActivity(todayKey)
+            activityProfile = store.getHealthProfile()
+            kotlinx.coroutines.delay(5000)
+        }
+    }
+
     var lastAdded by remember { mutableIntStateOf(0) }
     var goalInput by remember { mutableStateOf(goal.toString()) }
     var customInput by remember { mutableStateOf("") }
     var showGoalDialog by remember { mutableStateOf(false) }
     var showCustomDialog by remember { mutableStateOf(false) }
+    var showHistoryDialog by remember { mutableStateOf(false) }
+
+    var showActivityReportDialog by remember { mutableStateOf(false) }
+    var activityRecords by remember {
+        mutableStateOf<List<com.drinkwater.app.data.DailyActivityEntity>>(emptyList())
+    }
+    var activityMonth by remember {
+        mutableStateOf(java.time.YearMonth.now())
+    }
+    var selectedActivityDate by remember { mutableStateOf(todayKey) }
+
+    LaunchedEffect(showActivityReportDialog) {
+        if (showActivityReportDialog) {
+            activityRecords = store.getAllDailyActivity()
+            activityMonth = java.time.YearMonth.now()
+            selectedActivityDate = todayKey
+        }
+    }
+
 
     fun refreshHistory() {
         scope.launch {
@@ -1022,6 +1102,15 @@ private fun DailyGoalScreen(
     val progress =
         (intake.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
     val remaining = (goal - intake).coerceAtLeast(0)
+
+    val todaySteps = (todayActivity?.steps ?: 0).coerceAtLeast(0)
+    val stepGoal = (activityProfile?.averageDailySteps ?: 10000)
+        .coerceAtLeast(1)
+    val heightCm = (activityProfile?.heightCm ?: 170).coerceIn(100, 230)
+    val strideMetres = heightCm * 0.415 / 100.0
+    val estimatedDistanceKm = todaySteps * strideMetres / 1000.0
+    val estimatedWalkingMinutes = todaySteps / 100
+    val stepProgress = (todaySteps.toFloat() / stepGoal).coerceIn(0f, 1f)
 
     Column(
         modifier = Modifier
@@ -1067,6 +1156,19 @@ private fun DailyGoalScreen(
                 modifier = Modifier.padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = { showHistoryDialog = true }) {
+                        Text(
+                            "History",
+                            color = Blue,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
                 Box(
                     modifier = Modifier.size(165.dp),
                     contentAlignment = Alignment.Center
@@ -1119,180 +1221,510 @@ private fun DailyGoalScreen(
 
                 Spacer(Modifier.height(8.dp))
 
-                OutlinedButton(
-                    onClick = {
-                        goalInput = goal.toString()
-                        showGoalDialog = true
-                    },
-                    shape = RoundedCornerShape(14.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Daily target: $goal ml  ·  Edit")
+                    OutlinedButton(
+                        onClick = {
+                            goalInput = goal.toString()
+                            showGoalDialog = true
+                        },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(
+                            "Daily target: $goal ml · Edit",
+                            fontSize = 12.sp,
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            customInput = ""
+                            showCustomDialog = true
+                        },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text("+ Add Water", fontSize = 13.sp, maxLines = 1)
+                    }
                 }
             }
         }
 
-        Spacer(Modifier.height(22.dp))
+        Spacer(Modifier.height(16.dp))
 
-        Text(
-            "Add Water",
-            modifier = Modifier.fillMaxWidth(),
-            fontSize = 19.sp,
-            fontWeight = FontWeight.Bold,
-            color = Ink
-        )
-
-        Spacer(Modifier.height(10.dp))
-
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth()
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showActivityReportDialog = true },
+            shape = RoundedCornerShape(22.dp),
+            color = Color.White
         ) {
-            listOf(150, 250, 500).forEach { amount ->
-                OutlinedButton(
-                    onClick = {
-                        lastAdded = amount
-                        saveIntake(intake + amount)
-                    },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(
-                        horizontal = 3.dp,
-                        vertical = 10.dp
-                    ),
-                    shape = RoundedCornerShape(14.dp)
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("+$amount ml", fontSize = 12.sp)
+                    Text(
+                        "Daily Activity",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Ink
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "TODAY",
+                        fontSize = 10.sp,
+                        letterSpacing = 1.sp,
+                        color = Muted
+                    )
                 }
-            }
-        }
 
-        Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(14.dp))
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            OutlinedButton(
-                onClick = {
-                    customInput = ""
-                    showCustomDialog = true
-                },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text("Custom amount")
-            }
-
-            OutlinedButton(
-                onClick = {
-                    if (lastAdded > 0 && intake > 0) {
-                        saveIntake(intake - lastAdded)
-                        lastAdded = 0
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "STEPS",
+                            fontSize = 10.sp,
+                            letterSpacing = 0.7.sp,
+                            color = Muted
+                        )
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            "%,d".format(Locale.US, todaySteps),
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Ink
+                        )
+                        Text(
+                            "Goal %,d".format(Locale.US, stepGoal),
+                            fontSize = 10.sp,
+                            color = Muted
+                        )
                     }
-                },
-                enabled = lastAdded > 0 && intake > 0,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text("Undo last")
-            }
-        }
 
-        Spacer(Modifier.height(24.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "History",
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Bold,
-                color = Ink
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                "${history.size} days",
-                fontSize = 12.sp,
-                color = Muted
-            )
-        }
-
-        Spacer(Modifier.height(10.dp))
-
-        if (history.isEmpty()) {
-            Text(
-                "No intake history available yet.",
-                modifier = Modifier.fillMaxWidth(),
-                color = Muted,
-                fontSize = 13.sp,
-                textAlign = TextAlign.Center
-            )
-        } else {
-            history.forEach { day ->
-                val displayDate = runCatching {
-                    val parsed = java.text.SimpleDateFormat(
-                        "yyyy-MM-dd",
-                        Locale.US
-                    ).parse(day.date)
-
-                    if (parsed != null) {
-                        java.text.SimpleDateFormat(
-                            "dd MMM yyyy",
-                            Locale.getDefault()
-                        ).format(parsed)
-                    } else {
-                        day.date
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "DISTANCE",
+                            fontSize = 10.sp,
+                            letterSpacing = 0.7.sp,
+                            color = Muted
+                        )
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            String.format(Locale.US, "%.2f km", estimatedDistanceKm),
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Ink
+                        )
+                        Text(
+                            "Estimated",
+                            fontSize = 10.sp,
+                            color = Muted
+                        )
                     }
-                }.getOrDefault(day.date)
 
-                Surface(
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "WALKING",
+                            fontSize = 10.sp,
+                            letterSpacing = 0.7.sp,
+                            color = Muted
+                        )
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            "$estimatedWalkingMinutes min",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Ink
+                        )
+                        Text(
+                            "Estimated",
+                            fontSize = 10.sp,
+                            color = Muted
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                LinearProgressIndicator(
+                    progress = { stepProgress },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 8.dp),
-                    shape = RoundedCornerShape(15.dp),
-                    color = Color.White
+                        .height(7.dp),
+                    color = Blue,
+                    trackColor = PaleBlue
+                )
+
+                Spacer(Modifier.height(7.dp))
+
+                Text(
+                    "${(stepProgress * 100).toInt()}% of daily step goal",
+                    fontSize = 11.sp,
+                    color = Muted
+                )
+            }
+        }
+
+
+    }
+
+
+    if (showHistoryDialog) {
+        AlertDialog(
+            onDismissRequest = { showHistoryDialog = false },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                displayDate,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Ink
-                            )
+                    Text(
+                        "Water History",
+                        modifier = Modifier.weight(1f),
+                        color = Ink,
+                        fontWeight = FontWeight.Bold
+                    )
 
-                            Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${history.size} days",
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (history.isEmpty()) {
+                        Text(
+                            "No intake history available yet.",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            color = Muted,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    } else {
+                        history.forEach { day ->
 
-                            Text(
-                                if (day.goalMl != null) {
-                                    "${day.intakeMl} / ${day.goalMl} ml  ·  ${day.percentage}%"
+                            val displayDate = runCatching {
+                                val parsed = java.text.SimpleDateFormat(
+                                    "yyyy-MM-dd",
+                                    Locale.US
+                                ).parse(day.date)
+
+                                if (parsed != null) {
+                                    java.text.SimpleDateFormat(
+                                        "dd MMM yyyy",
+                                        Locale.getDefault()
+                                    ).format(parsed)
                                 } else {
-                                    "${day.intakeMl} ml  ·  Goal not recorded"
-                                },
-                                fontSize = 12.sp,
-                                color = Muted
-                            )
-                        }
-
-                        if (day.goalMl != null) {
-                            Text(
-                                if (day.completed) "Completed" else "In progress",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (day.completed) {
-                                    Color(0xFF238653)
-                                } else {
-                                    Blue
+                                    day.date
                                 }
+                            }.getOrDefault(day.date)
+
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 8.dp),
+                                shape = RoundedCornerShape(15.dp),
+                                color = Color(0xFFF7FAFF)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text(
+                                            displayDate,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Ink
+                                        )
+
+                                        Spacer(Modifier.height(4.dp))
+
+                                        Text(
+                                            if (day.goalMl != null) {
+                                                "${day.intakeMl} / ${day.goalMl} ml · ${day.percentage}%"
+                                            } else {
+                                                "${day.intakeMl} ml · Goal not recorded"
+                                            },
+                                            fontSize = 12.sp,
+                                            color = Muted
+                                        )
+                                    }
+
+                                    if (day.goalMl != null) {
+                                        Text(
+                                            if (day.completed) {
+                                                "Completed"
+                                            } else {
+                                                "In progress"
+                                            },
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (day.completed) {
+                                                Color(0xFF238653)
+                                            } else {
+                                                Blue
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showHistoryDialog = false }
+                ) {
+                    Text("Close", color = Blue)
+                }
+            },
+            containerColor = Color.White
+        )
+    }
+
+
+    if (showActivityReportDialog) {
+        val monthDays = (1..activityMonth.lengthOfMonth()).map { day ->
+            activityMonth.atDay(day).toString()
+        }
+        val recordsByDate = activityRecords.associateBy { it.date }
+        val monthRecords = monthDays.mapNotNull { recordsByDate[it] }
+        val maxSteps = (monthRecords.maxOfOrNull { it.steps } ?: 0).coerceAtLeast(1)
+        val totalSteps = monthRecords.sumOf { it.steps.coerceAtLeast(0) }
+        val recordedDays = monthRecords.size
+        val averageSteps = if (recordedDays > 0) totalSteps / recordedDays else 0
+        val totalWalkingMinutes = monthRecords.sumOf { it.walkingMinutes.coerceAtLeast(0) }
+        val goalDays = monthRecords.count { it.steps >= stepGoal }
+        val estimatedDistance = totalSteps * strideMetres / 1000.0
+        val selectedRecord = recordsByDate[selectedActivityDate]
+        val selectedSteps = selectedRecord?.steps ?: 0
+        val selectedMinutes = selectedRecord?.walkingMinutes ?: 0
+
+        AlertDialog(
+            onDismissRequest = { showActivityReportDialog = false },
+            title = {
+                Column {
+                    Text(
+                        "Monthly Activity",
+                        color = Ink,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        TextButton(
+                            onClick = {
+                                activityMonth = activityMonth.minusMonths(1)
+                                selectedActivityDate = activityMonth.atDay(1).toString()
+                            }
+                        ) {
+                            Text("‹ Previous", color = Blue)
+                        }
+                        Text(
+                            activityMonth.format(
+                                java.time.format.DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US)
+                            ),
+                            color = Ink,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        TextButton(
+                            enabled = activityMonth < java.time.YearMonth.now(),
+                            onClick = {
+                                activityMonth = activityMonth.plusMonths(1)
+                                selectedActivityDate = activityMonth.atDay(1).toString()
+                            }
+                        ) {
+                            Text(
+                                "Next ›",
+                                color = if (activityMonth < java.time.YearMonth.now()) Blue else Muted
                             )
                         }
                     }
                 }
-            }
-        }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 470.dp)
+                ) {
+                    Text(
+                        "DAILY STEPS",
+                        color = Muted,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .height(155.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        monthDays.forEach { date ->
+                            val record = recordsByDate[date]
+                            val steps = (record?.steps ?: 0).coerceAtLeast(0)
+                            val fraction = (steps.toFloat() / maxSteps).coerceIn(0f, 1f)
+                            val selected = selectedActivityDate == date
+
+                            Column(
+                                modifier = Modifier
+                                    .width(27.dp)
+                                    .fillMaxHeight()
+                                    .clickable { selectedActivityDate = date },
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Bottom
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(17.dp)
+                                        .height(
+                                            (if (steps == 0) 2f else (fraction * 105f).coerceAtLeast(5f)).dp
+                                        )
+                                        .background(
+                                            color = if (selected) Blue else Color(0xFF83B7F5),
+                                            shape = RoundedCornerShape(
+                                                topStart = 5.dp,
+                                                topEnd = 5.dp
+                                            )
+                                        )
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    date.takeLast(2).toInt().toString(),
+                                    color = if (selected) Blue else Muted,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider(color = Color(0xFFEAF0F8))
+                    Spacer(Modifier.height(12.dp))
+
+                    Text(
+                        java.time.LocalDate.parse(selectedActivityDate).format(
+                            java.time.format.DateTimeFormatter.ofPattern("EEE, dd MMM yyyy", Locale.US)
+                        ),
+                        color = Ink,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        "%,d steps  ·  %,d walking minutes".format(
+                            Locale.US,
+                            selectedSteps,
+                            selectedMinutes
+                        ),
+                        color = Blue,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+                    if (selectedRecord == null) {
+                        Text(
+                            "No saved activity record for this date.",
+                            color = Muted,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+                    HorizontalDivider(color = Color(0xFFEAF0F8))
+                    Spacer(Modifier.height(12.dp))
+
+                    Text(
+                        "MONTHLY SUMMARY",
+                        color = Muted,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    val summaryItems = listOf(
+                        Triple("Total steps", "%,d".format(Locale.US, totalSteps), "steps"),
+                        Triple("Daily average", "%,d".format(Locale.US, averageSteps), "recorded days"),
+                        Triple("Estimated distance", "%.2f".format(Locale.US, estimatedDistance), "km"),
+                        Triple("Walking time", "%,d".format(Locale.US, totalWalkingMinutes), "minutes"),
+                        Triple("Goal achieved", "$goalDays", "days")
+                    )
+
+                    summaryItems.forEach { item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                item.first,
+                                color = Muted,
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                item.second,
+                                color = Ink,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(item.third, color = Muted, fontSize = 10.sp)
+                        }
+                        HorizontalDivider(color = Color(0xFFEAF0F8))
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "$recordedDays days with saved activity records · Daily goal: %,d steps"
+                            .format(Locale.US, stepGoal),
+                        color = Muted,
+                        fontSize = 10.sp
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showActivityReportDialog = false }) {
+                    Text("Close", color = Blue)
+                }
+            },
+            containerColor = Color.White
+        )
     }
 
     if (showGoalDialog) {
@@ -1358,17 +1790,68 @@ private fun DailyGoalScreen(
             onDismissRequest = { showCustomDialog = false },
             title = { Text("Add Water", color = Ink) },
             text = {
-                OutlinedTextField(
-                    value = customInput,
-                    onValueChange = {
-                        customInput = it.filter(Char::isDigit).take(5)
-                    },
-                    label = { Text("Amount in ml") },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number
-                    ),
-                    singleLine = true
-                )
+                Column {
+                    Text(
+                        "Select an amount",
+                        fontSize = 13.sp,
+                        color = Muted
+                    )
+
+                    Spacer(Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(150, 250, 500).forEach { amount ->
+                            OutlinedButton(
+                                onClick = {
+                                    lastAdded = amount
+                                    saveIntake(intake + amount)
+                                    showCustomDialog = false
+                                },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(
+                                    horizontal = 3.dp,
+                                    vertical = 8.dp
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("+$amount ml", fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+
+                    OutlinedTextField(
+                        value = customInput,
+                        onValueChange = {
+                            customInput = it.filter(Char::isDigit).take(5)
+                        },
+                        label = { Text("Custom amount in ml") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number
+                        ),
+                        singleLine = true
+                    )
+
+                    if (lastAdded > 0 && intake > 0) {
+                        Spacer(Modifier.height(8.dp))
+
+                        OutlinedButton(
+                            onClick = {
+                                saveIntake(intake - lastAdded)
+                                lastAdded = 0
+                                showCustomDialog = false
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("Undo last addition")
+                        }
+                    }
+                }
             },
             confirmButton = {
                 OutlinedButton(
@@ -1422,25 +1905,15 @@ private fun HealthProfileSection() {
     var sex by remember { mutableStateOf("Prefer not to say") }
     var height by remember { mutableStateOf("") }
     var weight by remember { mutableStateOf("") }
-    var activity by remember { mutableStateOf("Sedentary") }
-    var averageSteps by remember { mutableStateOf("0") }
+    var averageSteps by remember { mutableStateOf("10000") }
+    var todaySteps by remember { mutableStateOf(0) }
 
-    var waterOverride by remember { mutableStateOf("") }
-    var stepsOverride by remember { mutableStateOf("") }
-    var minutesOverride by remember { mutableStateOf("") }
 
     var expandedSex by remember { mutableStateOf(false) }
-    var expandedActivity by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
 
-    val activityOptions = listOf(
-        "Sedentary",
-        "Lightly Active",
-        "Moderately Active",
-        "Very Active"
-    )
     val sexOptions = listOf(
         "Male",
         "Female",
@@ -1455,13 +1928,19 @@ private fun HealthProfileSection() {
             sex = profile.sex
             height = profile.heightCm.toString()
             weight = profile.weightKg.toString()
-            activity = profile.activityLevel
             averageSteps = profile.averageDailySteps.toString()
-            waterOverride = profile.waterGoalOverrideMl?.toString() ?: ""
-            stepsOverride = profile.stepsGoalOverride?.toString() ?: ""
-            minutesOverride = profile.walkingMinutesOverride?.toString() ?: ""
         }
         loaded = true
+    }
+
+    val todayKey = remember { WaterHistoryStore.todayKey() }
+
+    LaunchedEffect(todayKey) {
+        while (true) {
+            val record = repository.getDailyActivity(todayKey)
+            todaySteps = (record?.steps ?: 0).coerceAtLeast(0)
+            kotlinx.coroutines.delay(5000)
+        }
     }
 
     val ageValue = age.toIntOrNull()
@@ -1469,64 +1948,82 @@ private fun HealthProfileSection() {
     val weightValue = weight.toDoubleOrNull()
     val stepsValue = averageSteps.toIntOrNull()
 
-    val previewProfile = if (
-        ageValue != null && heightValue != null &&
-        weightValue != null && stepsValue != null
-    ) {
-        runCatching {
-            com.drinkwater.app.data.HealthProfileEntity(
-                name = name.trim(),
-                age = ageValue,
-                sex = sex,
-                heightCm = heightValue,
-                weightKg = weightValue,
-                activityLevel = activity,
-                averageDailySteps = stepsValue,
-                waterGoalOverrideMl = waterOverride.toIntOrNull(),
-                stepsGoalOverride = stepsOverride.toIntOrNull(),
-                walkingMinutesOverride = minutesOverride.toIntOrNull()
-            )
-        }.getOrNull()
-    } else null
+    val stepGoalValue = (stepsValue ?: 10000).coerceAtLeast(1)
 
-    val previewGoals = previewProfile?.let {
-        com.drinkwater.app.data.HealthGoalCalculator.calculate(it)
+    val activityType = when {
+        todaySteps < 3000 -> "Sedentary"
+        todaySteps < 5000 -> "Lightly Active"
+        todaySteps < 7500 -> "Moderately Active"
+        todaySteps < 10000 -> "Active"
+        else -> "Highly Active"
+    }
+
+    val stepGoalPercent = todaySteps.toFloat() / stepGoalValue.toFloat()
+
+    val activityStatus = when {
+        stepGoalPercent < 0.50f -> "Needs Improvement"
+        stepGoalPercent < 1.00f -> "In Progress"
+        stepGoalPercent < 1.25f -> "Goal Achieved"
+        else -> "Excellent"
     }
 
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+        shape = RoundedCornerShape(14.dp),
         color = Color.White
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Text(
-                "Health Profile",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = Ink
-            )
-
             Text("Personal Information", fontWeight = FontWeight.SemiBold, color = Ink)
 
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("Name (optional)") },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name (optional)") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                    )
+                OutlinedTextField(
+                    value = age,
+                    onValueChange = { age = it.filter(Char::isDigit).take(3) },
+                    label = { Text("Age (13–110)") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                    )
+            }
 
-            OutlinedTextField(
-                value = age,
-                onValueChange = { age = it.filter(Char::isDigit).take(3) },
-                label = { Text("Age (13–110 years)") },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true
-            )
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = height,
+                    onValueChange = { height = it.filter(Char::isDigit).take(3) },
+                    label = { Text("Height (cm)") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                    )
+                OutlinedTextField(
+                    value = weight,
+                    onValueChange = { weight = it.filter { c -> c.isDigit() || c == '.' }.take(6) },
+                    label = { Text("Weight (kg)") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                    )
+            }
 
             Box {
                 OutlinedButton(
@@ -1553,49 +2050,45 @@ private fun HealthProfileSection() {
 
             HorizontalDivider()
 
-            Text("Body Details", fontWeight = FontWeight.SemiBold, color = Ink)
-
-            OutlinedTextField(
-                value = height,
-                onValueChange = { height = it.filter(Char::isDigit).take(3) },
-                label = { Text("Height (cm)") },
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = weight,
-                onValueChange = { weight = it.filter { c -> c.isDigit() || c == '.' }.take(6) },
-                label = { Text("Weight (kg)") },
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                singleLine = true
-            )
-
-            HorizontalDivider()
 
             Text("Activity Information", fontWeight = FontWeight.SemiBold, color = Ink)
 
-            Box {
-                OutlinedButton(
-                    onClick = { expandedActivity = true },
-                    modifier = Modifier.fillMaxWidth()
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xFFF5FAFF)
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Activity: $activity")
-                }
-                DropdownMenu(
-                    expanded = expandedActivity,
-                    onDismissRequest = { expandedActivity = false }
-                ) {
-                    activityOptions.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option) },
-                            onClick = {
-                                activity = option
-                                expandedActivity = false
-                            }
-                        )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Activity Type", color = Muted)
+                        Text(activityType, color = Ink, fontWeight = FontWeight.SemiBold)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Today's Achieved Steps", color = Muted)
+                        Text("%,d".format(todaySteps), color = Ink, fontWeight = FontWeight.SemiBold)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Daily Step Goal", color = Muted)
+                        Text("%,d".format(stepGoalValue), color = Ink, fontWeight = FontWeight.SemiBold)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Today's Status", color = Muted)
+                        Text(activityStatus, color = Blue, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -1603,56 +2096,12 @@ private fun HealthProfileSection() {
             OutlinedTextField(
                 value = averageSteps,
                 onValueChange = { averageSteps = it.filter(Char::isDigit).take(6) },
-                label = { Text("Average daily steps") },
+                label = { Text("Average Daily Steps (Goal)") },
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true
-            )
-
-            HorizontalDivider()
-
-            Text("Your Daily Goals", fontWeight = FontWeight.SemiBold, color = Ink)
-
-            if (previewGoals != null) {
-                Text("Suggested water goal: ${previewGoals.waterMl} ml", color = Blue)
-                Text("Suggested steps: ${previewGoals.steps}", color = Blue)
-                Text("Suggested walking: ${previewGoals.walkingMinutes} minutes", color = Blue)
-            } else {
-                Text("Enter valid profile details to calculate your goals.", color = Muted)
-            }
-
-            OutlinedTextField(
-                value = waterOverride,
-                onValueChange = { waterOverride = it.filter(Char::isDigit).take(5) },
-                label = { Text("Water goal override (ml, optional)") },
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = stepsOverride,
-                onValueChange = { stepsOverride = it.filter(Char::isDigit).take(6) },
-                label = { Text("Steps goal override (optional)") },
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = minutesOverride,
-                onValueChange = { minutesOverride = it.filter(Char::isDigit).take(4) },
-                label = { Text("Walking minutes override (optional)") },
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true
-            )
-
-            Text(
-                "These are general wellness estimates, not medical advice. Follow your doctor's instructions if you have a prescribed fluid restriction.",
-                fontSize = 12.sp,
-                color = Muted
-            )
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp)
+                )
 
             Button(
                 onClick = {
@@ -1660,21 +2109,21 @@ private fun HealthProfileSection() {
                     val h = height.toIntOrNull()
                     val w = weight.toDoubleOrNull()
                     val steps = averageSteps.toIntOrNull()
-                    val water = waterOverride.toIntOrNull()
-                    val stepGoal = stepsOverride.toIntOrNull()
-                    val minutes = minutesOverride.toIntOrNull()
 
                     val valid =
                         a != null && a in 13..110 &&
                         h != null && h in 100..250 &&
                         w != null && w in 30.0..200.0 &&
-                        steps != null && steps in 0..50000 &&
-                        (waterOverride.isBlank() || water != null && water in 1500..4000) &&
-                        (stepsOverride.isBlank() || stepGoal != null && stepGoal in 500..30000) &&
-                        (minutesOverride.isBlank() || minutes != null && minutes in 1..600)
+                        steps != null && steps in 0..50000
 
                     if (!valid) {
-                        message = "Please check the entered values and goal overrides."
+                        val invalidFields = buildList {
+                            if (a == null || a !in 13..110) add("Age (13–110 years)")
+                            if (h == null || h !in 100..250) add("Height (100–250 cm)")
+                            if (w == null || w !in 30.0..200.0) add("Weight (30–200 kg)")
+                            if (steps == null || steps !in 0..50000) add("Daily Steps (0–50,000)")
+                        }
+                        message = "Please correct: ${invalidFields.joinToString(", ")}."
                     } else {
                         saving = true
                         message = ""
@@ -1686,11 +2135,11 @@ private fun HealthProfileSection() {
                                     sex = sex,
                                     heightCm = h!!,
                                     weightKg = w!!,
-                                    activityLevel = activity,
+                                    activityLevel = activityType,
                                     averageDailySteps = steps!!,
-                                    waterGoalOverrideMl = water,
-                                    stepsGoalOverride = stepGoal,
-                                    walkingMinutesOverride = minutes
+                                    waterGoalOverrideMl = null,
+                                    stepsGoalOverride = null,
+                                    walkingMinutesOverride = null
                                 )
                                 repository.saveHealthProfile(profile)
 
@@ -1711,7 +2160,7 @@ private fun HealthProfileSection() {
                 modifier = Modifier.fillMaxWidth(),
                 enabled = loaded && !saving
             ) {
-                Text(if (saving) "Saving…" else "Save / Update Profile")
+                Text(if (saving) "Saving…" else "Save Profile")
             }
 
             if (message.isNotBlank()) {
