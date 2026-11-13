@@ -305,9 +305,16 @@ private fun WaterHome(
     var selected by remember { mutableIntStateOf(prefs.getInt("interval", 30)) }
     var active by remember { mutableStateOf(prefs.getBoolean("active", false)) }
     var selectedTab by remember { mutableStateOf("Reminder") }
+    var monthlyActivityPage by remember { mutableStateOf(false) }
     var showRestoreConfirmation by remember { mutableStateOf(false) }
-    androidx.activity.compose.BackHandler(enabled = selectedTab == "Profile") {
-        selectedTab = "Daily Goal"
+    androidx.activity.compose.BackHandler(
+        enabled = monthlyActivityPage || selectedTab == "Profile"
+    ) {
+        if (monthlyActivityPage) {
+            monthlyActivityPage = false
+        } else {
+            selectedTab = "Daily Goal"
+        }
     }
     var nextReminderAt by remember { mutableStateOf(prefs.getLong("next_reminder_at", 0L)) }
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -372,7 +379,12 @@ private fun WaterHome(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .then(
+                        if (selectedTab == "Reminder")
+                            Modifier.verticalScroll(rememberScrollState())
+                        else Modifier
+                    ),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 if (selectedTab == "Reminder") {
@@ -429,11 +441,7 @@ private fun WaterHome(
                 }
             }
 
-            Spacer(Modifier.height(32.dp))
-
-
-
-            Spacer(Modifier.height(27.dp))
+            Spacer(Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -888,7 +896,9 @@ private fun WaterHome(
                         driveStatus = driveStatus,
                         driveMessage = driveMessage,
                         driveBusy = driveBusy,
-                        driveRefreshSignal = driveRefreshSignal
+                        driveRefreshSignal = driveRefreshSignal,
+                        monthlyActivityPage = monthlyActivityPage,
+                        onMonthlyActivityPageChange = { monthlyActivityPage = it }
                     )
                 }
             }
@@ -927,7 +937,8 @@ private fun WaterHome(
         }
 
 
-            NavigationBar(
+            if (!monthlyActivityPage) {
+        NavigationBar(
                 containerColor = Color(0xFFF5FAFF),
                 tonalElevation = 0.dp
             ) {
@@ -956,9 +967,9 @@ private fun WaterHome(
                         indicatorColor = Color(0xFFDCEEFF)
                     ),
                     icon = {
-                        Icon(
-                            Icons.Rounded.WaterDrop,
-                            contentDescription = "Daily Goal"
+                        Text(
+                            "🏃",
+                            fontSize = 22.sp
                         )
                     },
                     label = { Text("Daily Goal") }
@@ -980,6 +991,7 @@ private fun WaterHome(
                     label = { Text("Profile") }
                 )
             }
+        }
 
         }
     }
@@ -995,7 +1007,9 @@ private fun DailyGoalScreen(
     driveStatus: String,
     driveMessage: String,
     driveBusy: Boolean,
-    driveRefreshSignal: Int
+    driveRefreshSignal: Int,
+    monthlyActivityPage: Boolean,
+    onMonthlyActivityPageChange: (Boolean) -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -1060,7 +1074,6 @@ private fun DailyGoalScreen(
     var showCustomDialog by remember { mutableStateOf(false) }
     var showHistoryDialog by remember { mutableStateOf(false) }
 
-    var showActivityReportDialog by remember { mutableStateOf(false) }
     var activityRecords by remember {
         mutableStateOf<List<com.drinkwater.app.data.DailyActivityEntity>>(emptyList())
     }
@@ -1069,8 +1082,8 @@ private fun DailyGoalScreen(
     }
     var selectedActivityDate by remember { mutableStateOf(todayKey) }
 
-    LaunchedEffect(showActivityReportDialog) {
-        if (showActivityReportDialog) {
+    LaunchedEffect(monthlyActivityPage) {
+        if (monthlyActivityPage) {
             activityRecords = store.getAllDailyActivity()
             activityMonth = java.time.YearMonth.now()
             selectedActivityDate = todayKey
@@ -1112,6 +1125,7 @@ private fun DailyGoalScreen(
     val estimatedWalkingMinutes = todaySteps / 100
     val stepProgress = (todaySteps.toFloat() / stepGoal).coerceIn(0f, 1f)
 
+    if (!monthlyActivityPage) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1119,149 +1133,10 @@ private fun DailyGoalScreen(
             .padding(top = 20.dp, bottom = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "Daily Goal",
-                modifier = Modifier.weight(1f),
-                fontSize = 25.sp,
-                fontWeight = FontWeight.Bold,
-                color = Ink
-            )
-            TextButton(onClick = onOpenProfile) {
-                Text("👤", fontSize = 24.sp)
-            }
-        }
-
-        Spacer(Modifier.height(5.dp))
-
-        Text(
-            "Your daily hydration progress",
-            fontSize = 13.sp,
-            color = Muted
-        )
-
-        Spacer(Modifier.height(16.dp))
-
-        Spacer(Modifier.height(22.dp))
-
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(26.dp),
-            color = Color.White
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = { showHistoryDialog = true }) {
-                        Text(
-                            "History",
-                            color = Blue,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier.size(165.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier.fillMaxSize(),
-                        strokeWidth = 12.dp,
-                        color = Blue,
-                        trackColor = PaleBlue
-                    )
-
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            Icons.Rounded.WaterDrop,
-                            contentDescription = null,
-                            tint = Blue,
-                            modifier = Modifier.size(30.dp)
-                        )
-
-                        Text(
-                            "$intake ml",
-                            fontSize = 25.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Ink
-                        )
-
-                        Text("consumed", fontSize = 12.sp, color = Muted)
-                    }
-                }
-
-                Spacer(Modifier.height(16.dp))
-
-                Text(
-                    if (intake >= goal) {
-                        "Daily goal completed!"
-                    } else {
-                        "$remaining ml remaining"
-                    },
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink
-                )
-
-                Text(
-                    "${(progress * 100).toInt()}% of daily goal",
-                    fontSize = 13.sp,
-                    color = Muted
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            goalInput = goal.toString()
-                            showGoalDialog = true
-                        },
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Text(
-                            "Daily target: $goal ml · Edit",
-                            fontSize = 12.sp,
-                        )
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            customInput = ""
-                            showCustomDialog = true
-                        },
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Text("+ Add Water", fontSize = 13.sp, maxLines = 1)
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { showActivityReportDialog = true },
+                .clickable { onMonthlyActivityPageChange(true) },
             shape = RoundedCornerShape(22.dp),
             color = Color.White
         ) {
@@ -1378,6 +1253,9 @@ private fun DailyGoalScreen(
 
 
     }
+    }
+
+
 
 
     if (showHistoryDialog) {
@@ -1506,7 +1384,7 @@ private fun DailyGoalScreen(
     }
 
 
-    if (showActivityReportDialog) {
+    if (monthlyActivityPage) {
         val monthDays = (1..activityMonth.lengthOfMonth()).map { day ->
             activityMonth.atDay(day).toString()
         }
@@ -1523,208 +1401,238 @@ private fun DailyGoalScreen(
         val selectedSteps = selectedRecord?.steps ?: 0
         val selectedMinutes = selectedRecord?.walkingMinutes ?: 0
 
-        AlertDialog(
-            onDismissRequest = { showActivityReportDialog = false },
-            title = {
-                Column {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color(0xFFF5FAFF)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 4.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { onMonthlyActivityPageChange(false) }
+                    ) {
+                        Text("‹ Back", color = Blue, fontSize = 15.sp)
+                    }
                     Text(
                         "Monthly Activity",
+                        modifier = Modifier.weight(1f),
                         color = Ink,
                         fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        TextButton(
-                            onClick = {
-                                activityMonth = activityMonth.minusMonths(1)
-                                selectedActivityDate = activityMonth.atDay(1).toString()
-                            }
-                        ) {
-                            Text("‹ Previous", color = Blue)
-                        }
-                        Text(
-                            activityMonth.format(
-                                java.time.format.DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US)
-                            ),
-                            color = Ink,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
-                        TextButton(
-                            enabled = activityMonth < java.time.YearMonth.now(),
-                            onClick = {
-                                activityMonth = activityMonth.plusMonths(1)
-                                selectedActivityDate = activityMonth.atDay(1).toString()
-                            }
-                        ) {
-                            Text(
-                                "Next ›",
-                                color = if (activityMonth < java.time.YearMonth.now()) Blue else Muted
-                            )
-                        }
-                    }
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 470.dp)
-                ) {
-                    Text(
-                        "DAILY STEPS",
-                        color = Muted,
-                        fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
+                        textAlign = TextAlign.Center
                     )
-                    Spacer(Modifier.height(10.dp))
+                    Spacer(Modifier.width(60.dp))
+                }
 
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .height(155.dp),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        monthDays.forEach { date ->
-                            val record = recordsByDate[date]
-                            val steps = (record?.steps ?: 0).coerceAtLeast(0)
-                            val fraction = (steps.toFloat() / maxSteps).coerceIn(0f, 1f)
-                            val selected = selectedActivityDate == date
-
-                            Column(
-                                modifier = Modifier
-                                    .width(27.dp)
-                                    .fillMaxHeight()
-                                    .clickable { selectedActivityDate = date },
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Bottom
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(17.dp)
-                                        .height(
-                                            (if (steps == 0) 2f else (fraction * 105f).coerceAtLeast(5f)).dp
-                                        )
-                                        .background(
-                                            color = if (selected) Blue else Color(0xFF83B7F5),
-                                            shape = RoundedCornerShape(
-                                                topStart = 5.dp,
-                                                topEnd = 5.dp
-                                            )
-                                        )
-                                )
-                                Spacer(Modifier.height(6.dp))
-                                Text(
-                                    date.takeLast(2).toInt().toString(),
-                                    color = if (selected) Blue else Muted,
-                                    fontSize = 10.sp,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                                )
-                            }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TextButton(
+                        onClick = {
+                            activityMonth = activityMonth.minusMonths(1)
+                            selectedActivityDate = activityMonth.atDay(1).toString()
                         }
+                    ) {
+                        Text("‹ Previous", color = Blue)
                     }
 
-                    Spacer(Modifier.height(12.dp))
-                    HorizontalDivider(color = Color(0xFFEAF0F8))
-                    Spacer(Modifier.height(12.dp))
-
                     Text(
-                        java.time.LocalDate.parse(selectedActivityDate).format(
-                            java.time.format.DateTimeFormatter.ofPattern("EEE, dd MMM yyyy", Locale.US)
+                        activityMonth.format(
+                            java.time.format.DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US)
                         ),
                         color = Ink,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
+                        fontSize = 15.sp
                     )
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        "%,d steps  ·  %,d walking minutes".format(
-                            Locale.US,
-                            selectedSteps,
-                            selectedMinutes
-                        ),
-                        color = Blue,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp
-                    )
-                    if (selectedRecord == null) {
+
+                    TextButton(
+                        enabled = activityMonth < java.time.YearMonth.now(),
+                        onClick = {
+                            activityMonth = activityMonth.plusMonths(1)
+                            selectedActivityDate = activityMonth.atDay(1).toString()
+                        }
+                    ) {
                         Text(
-                            "No saved activity record for this date.",
-                            color = Muted,
-                            fontSize = 11.sp
+                            "Next ›",
+                            color = if (activityMonth < java.time.YearMonth.now()) Blue else Muted
                         )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(bottom = 16.dp)
+                ) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        color = Color.White
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text(
+                                "DAILY STEPS",
+                                color = Muted,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+
+                            Spacer(Modifier.height(14.dp))
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .height(165.dp),
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                verticalAlignment = Alignment.Bottom
+                            ) {
+                                monthDays.forEach { date ->
+                                    val record = recordsByDate[date]
+                                    val steps = (record?.steps ?: 0).coerceAtLeast(0)
+                                    val fraction = (steps.toFloat() / maxSteps).coerceIn(0f, 1f)
+                                    val selected = selectedActivityDate == date
+
+                                    Column(
+                                        modifier = Modifier
+                                            .width(27.dp)
+                                            .fillMaxHeight()
+                                            .clickable { selectedActivityDate = date },
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Bottom
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(17.dp)
+                                                .height(
+                                                    (if (steps == 0) 2f else
+                                                        (fraction * 105f).coerceAtLeast(5f)).dp
+                                                )
+                                                .background(
+                                                    color = if (selected) Blue else Color(0xFF83B7F5),
+                                                    shape = RoundedCornerShape(
+                                                        topStart = 5.dp,
+                                                        topEnd = 5.dp
+                                                    )
+                                                )
+                                        )
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(
+                                            date.takeLast(2).toInt().toString(),
+                                            color = if (selected) Blue else Muted,
+                                            fontSize = 10.sp,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(Modifier.height(16.dp))
+                            HorizontalDivider(color = Color(0xFFEAF0F8))
+                            Spacer(Modifier.height(14.dp))
+
+                            Text(
+                                java.time.LocalDate.parse(selectedActivityDate).format(
+                                    java.time.format.DateTimeFormatter.ofPattern(
+                                        "EEE, dd MMM yyyy", Locale.US
+                                    )
+                                ),
+                                color = Ink,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Spacer(Modifier.height(5.dp))
+                            Text(
+                                "%,d steps  ·  %,d walking minutes".format(
+                                    Locale.US, selectedSteps, selectedMinutes
+                                ),
+                                color = Blue,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            if (selectedRecord == null) {
+                                Text(
+                                    "No saved activity record for this date.",
+                                    color = Muted,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
                     }
 
                     Spacer(Modifier.height(14.dp))
-                    HorizontalDivider(color = Color(0xFFEAF0F8))
-                    Spacer(Modifier.height(12.dp))
 
-                    Text(
-                        "MONTHLY SUMMARY",
-                        color = Muted,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
-                    )
-                    Spacer(Modifier.height(10.dp))
-
-                    val summaryItems = listOf(
-                        Triple("Total steps", "%,d".format(Locale.US, totalSteps), "steps"),
-                        Triple("Daily average", "%,d".format(Locale.US, averageSteps), "recorded days"),
-                        Triple("Estimated distance", "%.2f".format(Locale.US, estimatedDistance), "km"),
-                        Triple("Walking time", "%,d".format(Locale.US, totalWalkingMinutes), "minutes"),
-                        Triple("Goal achieved", "$goalDays", "days")
-                    )
-
-                    summaryItems.forEach { item ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        color = Color.White
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
                             Text(
-                                item.first,
+                                "MONTHLY SUMMARY",
                                 color = Muted,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(1f)
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
                             )
-                            Text(
-                                item.second,
-                                color = Ink,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(Modifier.width(5.dp))
-                            Text(item.third, color = Muted, fontSize = 10.sp)
-                        }
-                        HorizontalDivider(color = Color(0xFFEAF0F8))
-                    }
+                            Spacer(Modifier.height(10.dp))
 
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "$recordedDays days with saved activity records · Daily goal: %,d steps"
-                            .format(Locale.US, stepGoal),
-                        color = Muted,
-                        fontSize = 10.sp
-                    )
+                            val summaryItems = listOf(
+                                Triple("Total steps", "%,d".format(Locale.US, totalSteps), "steps"),
+                                Triple("Daily average", "%,d".format(Locale.US, averageSteps), "recorded days"),
+                                Triple("Estimated distance", "%.2f".format(Locale.US, estimatedDistance), "km"),
+                                Triple("Walking time", "%,d".format(Locale.US, totalWalkingMinutes), "minutes"),
+                                Triple("Goal achieved", "$goalDays", "days")
+                            )
+
+                            summaryItems.forEach { item ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        item.first,
+                                        color = Muted,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        item.second,
+                                        color = Ink,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(Modifier.width(5.dp))
+                                    Text(item.third, color = Muted, fontSize = 10.sp)
+                                }
+                                HorizontalDivider(color = Color(0xFFEAF0F8))
+                            }
+
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "$recordedDays days with saved activity records · Daily goal: %,d steps"
+                                    .format(Locale.US, stepGoal),
+                                color = Muted,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showActivityReportDialog = false }) {
-                    Text("Close", color = Blue)
-                }
-            },
-            containerColor = Color.White
-        )
+            }
+        }
     }
 
     if (showGoalDialog) {
